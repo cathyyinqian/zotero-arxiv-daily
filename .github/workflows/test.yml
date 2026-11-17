@@ -1,6 +1,9 @@
-name: Test
+name: Preview (no email)
 on:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   calculate-and-send:
@@ -8,9 +11,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      #  with:
-      #    repository: ${{ vars.REPOSITORY }}
-      #    ref: ${{ vars.REF }}
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v7.1.4
@@ -18,17 +18,26 @@ jobs:
 
       - name: Run script
         env:
+          TZ: Asia/Shanghai
+          PYTHONPATH: src
           ZOTERO_ID: ${{ secrets.ZOTERO_ID }}
           ZOTERO_KEY: ${{ secrets.ZOTERO_KEY }}
-          SENDER: ${{ secrets.SENDER }}
-          RECEIVER: ${{ secrets.RECEIVER }}
-          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE }}
+          OPENAI_API_BASE: ${{ secrets.OPENAI_API_BASE || 'https://api.deepseek.com' }}
+          LLM_ENABLED: ${{ vars.LLM_ENABLED || 'false' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek-flash' }}
           CUSTOM_CONFIG: ${{ vars.CUSTOM_CONFIG }}
         run: |
-          export DEBUG=true
-          printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
-          echo "Use custom config: "
-          cat config/custom.yaml
-          uv run src/zotero_arxiv_daily/main.py
+          if [ -n "$CUSTOM_CONFIG" ]; then
+            printf '%s\n' "$CUSTOM_CONFIG" > config/custom.yaml
+          fi
+          uv run --frozen python scripts/check_setup.py
+          uv run --frozen src/zotero_arxiv_daily/main.py executor.debug=true executor.dry_run=true executor.max_paper_num=3 executor.output_path=outputs/daily-preview.html
+
+      - name: Save preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-preview
+          path: outputs/daily-preview.html
+          if-no-files-found: warn
+          retention-days: 7

@@ -19,6 +19,7 @@ def _raise_runtime_error() -> None:
 
 
 def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
+    config.source.arxiv.include_cross_list = False
     monkeypatch.setattr("zotero_arxiv_daily.retriever.base.sleep", lambda _: None)
 
     # The RSS fixture gives us paper IDs.  After feedparser, the code calls
@@ -61,6 +62,65 @@ def test_arxiv_retriever(config, mock_feedparser, monkeypatch):
 
     assert len(papers) == len(new_entries)
     assert set(p.title for p in papers) == set(e.title for e in new_entries)
+
+
+def test_convert_to_paper_skips_full_text_when_llm_disabled(config, monkeypatch):
+    config.llm.enabled = False
+    raw_paper = SimpleNamespace(
+        title="RSS paper",
+        authors=[SimpleNamespace(name="Test Author")],
+        summary="RSS abstract",
+        pdf_url="https://arxiv.org/pdf/2609.22090",
+        entry_id="https://arxiv.org/abs/2609.22090",
+    )
+
+    def unexpected_extraction(*args, **kwargs):
+        raise AssertionError("Full text must not be downloaded when LLM is disabled")
+
+    for name in ("extract_text_from_tar", "extract_text_from_html", "extract_text_from_pdf"):
+        monkeypatch.setattr(arxiv_retriever, name, unexpected_extraction)
+
+    paper = ArxivRetriever(config).convert_to_paper(raw_paper)
+
+    assert paper.full_text is None
+    assert paper.title == raw_paper.title
+    assert paper.authors == ["Test Author"]
+    assert paper.abstract == raw_paper.summary
+    assert paper.url == raw_paper.entry_id
+    assert paper.pdf_url == raw_paper.pdf_url
+
+
+def test_convert_to_paper_keeps_full_text_fallback_when_llm_enabled(config, monkeypatch):
+    config.llm.enabled = True
+    raw_paper = SimpleNamespace(
+        title="RSS paper",
+        authors=[SimpleNamespace(name="Test Author")],
+        summary="RSS abstract",
+        pdf_url="https://arxiv.org/pdf/2609.22090",
+        entry_id="https://arxiv.org/abs/2609.22090",
+    )
+    calls = []
+
+    def extract_tar(paper):
+        calls.append("tar")
+        return None
+
+    def extract_html(paper):
+        calls.append("html")
+        return None
+
+    def extract_pdf(paper):
+        calls.append("pdf")
+        return "Full paper text"
+
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_tar", extract_tar)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_html", extract_html)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_pdf", extract_pdf)
+
+    paper = ArxivRetriever(config).convert_to_paper(raw_paper)
+
+    assert paper.full_text == "Full paper text"
+    assert calls == ["tar", "html", "pdf"]
 
 
 def test_run_with_hard_timeout_returns_value():

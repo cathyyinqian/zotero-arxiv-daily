@@ -6,6 +6,7 @@ from .retriever import get_retriever_cls
 from .protocol import CorpusPaper
 import random
 from datetime import datetime
+from pathlib import Path
 from .reranker import get_reranker_cls
 from .construct_email import render_email
 from .utils import send_email
@@ -38,7 +39,9 @@ class Executor:
             source: get_retriever_cls(source)(config) for source in config.executor.source
         }
         self.reranker = get_reranker_cls(config.executor.reranker)(config)
-        self.openai_client = OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url)
+        self.openai_client = None
+        if config.llm.get("enabled", True):
+            self.openai_client = OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url)
     def fetch_zotero_corpus(self) -> list[CorpusPaper]:
         logger.info("Fetching zotero corpus")
         zot = zotero.Zotero(self.config.zotero.user_id, 'user', self.config.zotero.api_key)
@@ -94,8 +97,7 @@ class Executor:
         corpus = self.fetch_zotero_corpus()
         corpus = self.filter_corpus(corpus)
         if len(corpus) == 0:
-            logger.error(f"No zotero papers found. Please check your zotero settings:\n{self.config.zotero}")
-            return
+            raise RuntimeError("No zotero papers found. Check your collection filters and ensure papers have abstracts.")
         all_papers = []
         for source, retriever in self.retrievers.items():
             logger.info(f"Retrieving {source} papers...")
@@ -111,14 +113,25 @@ class Executor:
             logger.info("Reranking papers...")
             reranked_papers = self.reranker.rerank(all_papers, corpus)
             reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
-            logger.info("Generating TLDR and affiliations...")
-            for p in tqdm(reranked_papers):
-                p.generate_tldr(self.openai_client, self.config.llm)
-                p.generate_affiliations(self.openai_client, self.config.llm)
+            if self.config.llm.get("enabled", True):
+                logger.info("Generating TLDR and affiliations...")
+                for p in tqdm(reranked_papers):
+                    p.generate_tldr(self.openai_client, self.config.llm)
+                    p.generate_affiliations(self.openai_client, self.config.llm)
+            else:
+                logger.info("LLM disabled; using existing summaries or paper abstracts.")
+                for p in reranked_papers:
+                    p.tldr = p.tldr or p.abstract
         elif not self.config.executor.send_empty:
             logger.info("No new papers found. No email will be sent.")
             return
-        logger.info("Sending email...")
         email_content = render_email(reranked_papers)
+        if self.config.executor.get("dry_run", False):
+            output_path = Path(self.config.executor.get("output_path", "outputs/daily-preview.html")).expanduser()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(email_content, encoding="utf-8")
+            logger.info(f"Preview saved to {output_path.resolve()}. No email was sent.")
+            return
+        logger.info("Sending email...")
         send_email(self.config, email_content)
         logger.info("Email sent successfully")

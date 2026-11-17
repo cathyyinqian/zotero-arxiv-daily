@@ -121,69 +121,121 @@ class TestGlobMatch:
 # ---------------------------------------------------------------------------
 
 
-def test_send_email_starttls_success(config, monkeypatch):
+@pytest.mark.parametrize("port", [465, 587, 1025])
+def test_send_email_uses_encrypted_transport(config, monkeypatch, port):
+    import ssl
+
+    config.email.smtp_port = port
     sent = []
-    monkeypatch.setattr(smtplib, "SMTP", make_stub_smtp(sent))
+    calls = []
+    StubSMTP = make_stub_smtp(sent)
+
+    class RecordingSMTP(StubSMTP):
+        def __init__(self, host, actual_port, **kwargs):
+            calls.append(("connect", host, actual_port, kwargs))
+
+        def starttls(self, **kwargs):
+            calls.append(("starttls", kwargs))
+
+        def login(self, user, password):
+            calls.append(("login", user, password))
+
+        def quit(self):
+            calls.append(("quit",))
+
+        def close(self):
+            calls.append(("close",))
+
+    def unexpected_transport(*args, **kwargs):
+        pytest.fail("The port selected the wrong SMTP transport")
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", RecordingSMTP if port == 465 else unexpected_transport)
+    monkeypatch.setattr(smtplib, "SMTP", unexpected_transport if port == 465 else RecordingSMTP)
     send_email(config, "<html>hello</html>")
+
+    connection = calls[0]
+    assert connection[1:3] == ("localhost", port)
+    assert connection[3]["timeout"] == 30
+    if port == 465:
+        context = connection[3]["context"]
+        assert not any(call[0] == "starttls" for call in calls)
+    else:
+        assert calls[1][0] == "starttls"
+        context = calls[1][1]["context"]
+    assert context.check_hostname
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert calls[-2:] == [("quit",), ("close",)]
     assert len(sent) == 1
     sender, recipients, body = sent[0]
     assert sender == "test@example.com"
     assert recipients == ["test@example.com"]
-    # Body is a full MIME message (base64-encoded). Check the raw MIME string.
     assert "text/html" in body
 
 
-def test_send_email_falls_back_to_ssl(config, monkeypatch):
-    sent = []
-    call_count = {"smtp": 0}
+@pytest.mark.parametrize("port, failure", [
+    (587, "starttls"),
+    (587, "login"),
+    (465, "login"),
+    (587, "sendmail"),
+    (465, "sendmail"),
+    (587, "quit"),
+])
+def test_send_email_closes_on_error_without_fallback(config, monkeypatch, port, failure):
+    config.email.smtp_port = port
+    calls = []
 
-    StubOK = make_stub_smtp(sent)
+    def record(operation):
+        calls.append(operation)
+        if operation == failure:
+            raise OSError(f"{operation} failed")
 
-    class StubSMTP_TLS_Fails:
-        def __init__(self, *a, **kw):
-            call_count["smtp"] += 1
-        def starttls(self):
-            raise OSError("TLS not supported")
+    class FailingSMTP:
+        def __init__(self, *args, **kwargs):
+            record("connect")
 
-    class StubSMTP_SSL(StubOK):
-        pass
+        def starttls(self, **kwargs):
+            record("starttls")
 
-    monkeypatch.setattr(smtplib, "SMTP", StubSMTP_TLS_Fails)
-    monkeypatch.setattr(smtplib, "SMTP_SSL", StubSMTP_SSL)
-    send_email(config, "<html>ssl</html>")
-    assert len(sent) == 1
+        def login(self, *args):
+            record("login")
 
+        def sendmail(self, *args):
+            record("sendmail")
 
-def test_send_email_falls_back_to_plain(config, monkeypatch):
-    sent = []
-    call_count = {"smtp": 0}
-
-    StubOK = make_stub_smtp(sent)
-
-    class StubSMTP_TLS_Fails:
-        def __init__(self, *a, **kw):
-            call_count["smtp"] += 1
-            if call_count["smtp"] == 1:
-                pass  # first SMTP() call succeeds, but starttls will fail
-            else:
-                pass  # third SMTP() call is the plain fallback
-        def starttls(self):
-            raise OSError("TLS not supported")
-        def login(self, u, p):
-            pass
-        def sendmail(self, s, r, m):
-            sent.append((s, r, m))
         def quit(self):
-            pass
+            record("quit")
 
-    class StubSMTP_SSL_Fails:
-        def __init__(self, *a, **kw):
-            raise OSError("SSL not supported")
+        def close(self):
+            record("close")
 
-    monkeypatch.setattr(smtplib, "SMTP", StubSMTP_TLS_Fails)
-    monkeypatch.setattr(smtplib, "SMTP_SSL", StubSMTP_SSL_Fails)
-    send_email(config, "<html>plain</html>")
-    assert len(sent) == 1
+    def unexpected_transport(*args, **kwargs):
+        pytest.fail("An SMTP error must not trigger a transport fallback")
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", FailingSMTP if port == 465 else unexpected_transport)
+    monkeypatch.setattr(smtplib, "SMTP", unexpected_transport if port == 465 else FailingSMTP)
+    with pytest.raises(OSError, match=f"{failure} failed"):
+        send_email(config, "<html>hello</html>")
+
+    assert calls.count("connect") == 1
+    assert calls[-1] == "close"
+    if failure == "starttls":
+        assert "login" not in calls
+        assert "sendmail" not in calls
+
+
+def test_send_email_ssl_connection_error_does_not_fall_back(config, monkeypatch):
+    config.email.smtp_port = 465
+
+    def failed_ssl(*args, **kwargs):
+        raise OSError("SSL connection failed")
+
+    def unexpected_smtp(*args, **kwargs):
+        pytest.fail("An SSL connection error must not fall back to plaintext SMTP")
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", failed_ssl)
+    monkeypatch.setattr(smtplib, "SMTP", unexpected_smtp)
+    with pytest.raises(OSError, match="SSL connection failed"):
+        send_email(config, "<html>hello</html>")
 
 
 # ---------------------------------------------------------------------------

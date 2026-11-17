@@ -1,27 +1,45 @@
+# Credentials belong in .env or GitHub Secrets.
 zotero:
-  user_id: ${oc.env:ZOTERO_ID}
-  api_key: ${oc.env:ZOTERO_KEY}
-  include_path: null # Or set a list of glob patterns, e.g. ["2026/survey/**","2026/reading-group/**"]
+  user_id: ${oc.env:ZOTERO_ID,''}
+  api_key: ${oc.env:ZOTERO_KEY,''}
+  include_path:
+    - "25-11-3-开题"
+    - "25-11-3-开题/**"
+    - "25-5-26 景观感知SCI"
+    - "25-5-26 景观感知SCI/**"
+    - "C1 分类文献/景观感知landscape perception"
+    - "C1 分类文献/景观感知landscape perception/**"
+    - "C1 分类文献/数据驱动"
+    - "C1 分类文献/数据驱动/**"
+    - "C1 分类文献/循证设计Evidence Design"
+    - "C1 分类文献/循证设计Evidence Design/**"
 
 email:
-  sender: ${oc.env:SENDER}
-  receiver: ${oc.env:RECEIVER}
-  smtp_server: smtp.qq.com
+  sender: ${oc.env:SENDER,''}
+  receiver: ${oc.env:RECEIVER,''}
+  smtp_server: smtp.163.com
   smtp_port: 465
-  sender_password: ${oc.env:SENDER_PASSWORD}
+  sender_password: ${oc.env:SENDER_PASSWORD,''}
 
 llm:
+  enabled: ${oc.decode:${oc.env:LLM_ENABLED,false}}
   api:
-    key: ${oc.env:OPENAI_API_KEY}
-    base_url: ${oc.env:OPENAI_API_BASE}
+    key: ${oc.env:OPENAI_API_KEY,''}
+    base_url: ${oc.env:OPENAI_API_BASE,https://api.deepseek.com}
   api_mode: chat_completion
   generation_kwargs:
-    model: gpt-4o-mini
+    model: ${oc.env:LLM_MODEL,deepseek-flash}
+    max_tokens: 4096
+  language: Simplified Chinese
 
 source:
   arxiv:
-    category: ["cs.AI","cs.CV","cs.LG","cs.CL"]
+    category: ["cs.CV", "cs.AI", "cs.LG", "cs.CY"]
+    include_cross_list: true
 
 executor:
-  debug: ${oc.env:DEBUG,null}
-  source: ['arxiv']
+  debug: ${oc.decode:${oc.env:DEBUG,false}}
+  source: ["arxiv"]
+  reranker: local
+  max_paper_num: 5
+  send_empty: true

@@ -281,3 +281,104 @@ def test_run_no_papers_send_empty_true(config, monkeypatch):
     assert len(sent) == 1, "Email should be sent even with no papers when send_empty=true"
     _, _, body = sent[0]
     assert "text/html" in body
+
+
+# ---------------------------------------------------------------------------
+# Local preview and optional LLM
+# ---------------------------------------------------------------------------
+
+
+def _stub_pipeline(monkeypatch, papers):
+    """Keep preview tests independent of API clients and local model downloads."""
+    from types import SimpleNamespace
+
+    from tests.canned_responses import make_sample_corpus
+
+    monkeypatch.setattr(
+        "zotero_arxiv_daily.executor.get_retriever_cls",
+        lambda source: lambda config: SimpleNamespace(retrieve_papers=lambda: papers),
+    )
+    monkeypatch.setattr(
+        "zotero_arxiv_daily.executor.get_reranker_cls",
+        lambda name: lambda config: SimpleNamespace(rerank=lambda retrieved, corpus: retrieved),
+    )
+    monkeypatch.setattr(Executor, "fetch_zotero_corpus", lambda self: make_sample_corpus())
+
+
+@pytest.mark.parametrize("has_papers", [False, True])
+@pytest.mark.parametrize("custom_output", [False, True])
+def test_dry_run_writes_preview_and_never_sends_email(
+    config, monkeypatch, tmp_path, has_papers, custom_output
+):
+    from tests.canned_responses import make_sample_paper
+
+    config.executor.dry_run = True
+    config.executor.send_empty = True
+    config.llm.enabled = False
+    # Preview must not need SMTP credentials.
+    config.email = {"sender": "???", "sender_password": "???"}
+    monkeypatch.chdir(tmp_path)
+    if custom_output:
+        config.executor.output_path = str(tmp_path / "custom" / "preview.html")
+    papers = [make_sample_paper(title="本地预览论文")] if has_papers else []
+    _stub_pipeline(monkeypatch, papers)
+
+    def fail_send(*args, **kwargs):
+        pytest.fail("dry_run must never call send_email")
+
+    monkeypatch.setattr("zotero_arxiv_daily.executor.send_email", fail_send)
+
+    Executor(config).run()
+
+    from pathlib import Path
+
+    preview = Path(config.executor.output_path)
+    assert preview.is_file()
+    html = preview.read_text(encoding="utf-8")
+    assert "<html>" in html
+    assert ("本地预览论文" if has_papers else "今日无更新") in html
+
+
+def test_disabled_llm_needs_no_client_or_credentials_and_uses_existing_text(config, monkeypatch):
+    from tests.canned_responses import make_sample_paper
+    from zotero_arxiv_daily.protocol import Paper
+
+    config.llm.enabled = False
+    config.llm.api.key = "???"
+    config.llm.api.base_url = "???"
+    papers = [
+        make_sample_paper(abstract="Original abstract.", affiliations=["Known University"]),
+        make_sample_paper(tldr="Existing summary."),
+    ]
+    _stub_pipeline(monkeypatch, papers)
+
+    def fail_llm(*args, **kwargs):
+        pytest.fail("Disabled LLM must not create a client or generate text")
+
+    monkeypatch.setattr("zotero_arxiv_daily.executor.OpenAI", fail_llm)
+    monkeypatch.setattr(Paper, "generate_tldr", fail_llm)
+    monkeypatch.setattr(Paper, "generate_affiliations", fail_llm)
+    sent = []
+    monkeypatch.setattr("zotero_arxiv_daily.executor.send_email", lambda cfg, html: sent.append(html))
+
+    executor = Executor(config)
+    assert executor.openai_client is None
+    executor.run()
+
+    assert len(sent) == 1
+    assert papers[0].tldr == "Original abstract."
+    assert papers[0].affiliations == ["Known University"]
+    assert papers[1].tldr == "Existing summary."
+    assert "Original abstract." in sent[0]
+    assert "Existing summary." in sent[0]
+
+
+def test_empty_corpus_fails_without_exposing_credentials(config, monkeypatch):
+    config.llm.enabled = False
+    config.zotero.api_key = "private-zotero-api-key"
+    _stub_pipeline(monkeypatch, [])
+    monkeypatch.setattr(Executor, "fetch_zotero_corpus", lambda self: [])
+    with pytest.raises(RuntimeError, match="collection filters") as exc:
+        Executor(config).run()
+
+    assert "private-zotero-api-key" not in str(exc.value)

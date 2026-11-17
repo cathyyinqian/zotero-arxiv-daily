@@ -17,3 +17,11 @@ models
 test-compose.yml
 outputs
 config/private.yaml
+
+# Project-local runtime, caches, and private setup material
+.tools/
+.python/
+.cache/
+.private/
+.env.*
+!.env.example
