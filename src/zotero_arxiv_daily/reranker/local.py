@@ -2,6 +2,7 @@ from .base import BaseReranker, register_reranker
 import logging
 import warnings
 import numpy as np
+from loguru import logger
 @register_reranker("local")
 class LocalReranker(BaseReranker):
     def get_similarity_score(self, s1: list[str], s2: list[str]) -> np.ndarray:
@@ -20,6 +21,10 @@ class LocalReranker(BaseReranker):
             warnings.filterwarnings("ignore", category=FutureWarning)
 
         encoder = SentenceTransformer(self.config.reranker.local.model, trust_remote_code=True)
+        # Some CPU runners emulate BF16 slowly; keep the original model at FP32 on CPU.
+        if encoder.device.type == "cpu":
+            encoder.float()
+        logger.info("Local embedding encoder: device={}, dtype={}", encoder.device, encoder.dtype)
         if self.config.reranker.local.encode_kwargs:
             encode_kwargs = self.config.reranker.local.encode_kwargs
         else:
